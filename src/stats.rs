@@ -33,9 +33,10 @@ impl Counter {
 
 struct ProcessStats {
     rtt_us: String,
-    quiet: bool,
+    quiet: String,
     busy: usize,
-    beat: chrono::DateTime<chrono::Utc>,
+    beat: f64,
+    concurrency: usize,
     info: ProcessInfo,
     rss: String,
 }
@@ -46,10 +47,12 @@ struct ProcessInfo {
     identity: String,
     started_at: f64,
     pid: u32,
-    tag: Option<String>,
+    tag: String,
     concurrency: usize,
     queues: Vec<String>,
     labels: Vec<String>,
+    version: String,
+    embedded: bool,
 }
 
 pub struct StatsPublisher {
@@ -107,22 +110,24 @@ impl StatsPublisher {
         let mut conn = redis.get().await?;
         let _: () = conn
             .cmd_with_key("HSET", self.identity.clone())
-            .arg("rss")
-            .arg(stats.rss)
-            .arg("rtt_us")
-            .arg(stats.rtt_us)
-            .arg("busy")
-            .arg(stats.busy)
-            .arg("quiet")
-            .arg(stats.quiet)
-            .arg("beat")
-            .arg(stats.beat.timestamp())
             .arg("info")
             .arg(serde_json::to_string(&stats.info)?)
+            .arg("concurrency")
+            .arg(stats.concurrency)
+            .arg("busy")
+            .arg(stats.busy)
+            .arg("beat")
+            .arg(stats.beat)
+            .arg("rtt_us")
+            .arg(stats.rtt_us)
+            .arg("quiet")
+            .arg(stats.quiet)
+            .arg("rss")
+            .arg(stats.rss)
             .query_async::<()>(conn.unnamespaced_borrow_mut())
             .await?;
 
-        conn.expire(self.identity.clone(), 30).await?;
+        conn.expire(self.identity.clone(), 60).await?;
 
         conn.sadd("processes".to_string(), self.identity.clone())
             .await?;
@@ -131,37 +136,65 @@ impl StatsPublisher {
     }
 
     async fn create_process_stats(&self) -> Result<ProcessStats, Box<dyn std::error::Error>> {
-        #[cfg(feature = "rss-stats")]
-        let rss_in_kb = format!(
-            "{}",
-            simple_process_stats::ProcessStats::get()
-                .await?
-                .memory_usage_bytes
-                / 1024
-        );
-
-        #[cfg(not(feature = "rss-stats"))]
-        let rss_in_kb = "0".to_string();
+        let rss_in_kb = format!("{}", get_rss_kb());
 
         Ok(ProcessStats {
             rtt_us: "0".into(),
             busy: self.busy_jobs.value(),
-            quiet: false,
+            quiet: "false".into(),
             rss: rss_in_kb,
-
-            beat: chrono::Utc::now(),
+            concurrency: self.concurrency,
+            beat: chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
             info: ProcessInfo {
                 concurrency: self.concurrency,
                 hostname: self.hostname.clone(),
                 identity: self.identity.clone(),
                 queues: self.queues.clone(),
-                started_at: self.started_at.clone().timestamp() as f64,
+                started_at: self.started_at.timestamp_millis() as f64 / 1000.0,
                 pid: std::process::id(),
-
-                // TODO: Fill out labels and tags.
                 labels: vec![],
-                tag: None,
+                tag: String::new(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                embedded: false,
             },
         })
     }
+}
+
+/// Get RSS (resident set size) in kilobytes for the current process.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // mach_task_self is deprecated in libc, but works fine
+fn get_rss_kb() -> u64 {
+    use std::mem;
+    unsafe {
+        let mut info: libc::mach_task_basic_info_data_t = mem::zeroed();
+        let mut count = (mem::size_of::<libc::mach_task_basic_info_data_t>()
+            / mem::size_of::<libc::natural_t>())
+            as libc::mach_msg_type_number_t;
+        let ret = libc::task_info(
+            libc::mach_task_self(),
+            libc::MACH_TASK_BASIC_INFO,
+            &mut info as *mut _ as libc::task_info_t,
+            &mut count,
+        );
+        if ret == libc::KERN_SUCCESS {
+            info.resident_size as u64 / 1024
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn get_rss_kb() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|pages| pages * 4) // page size is typically 4KB
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn get_rss_kb() -> u64 {
+    0
 }

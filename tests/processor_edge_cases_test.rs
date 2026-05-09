@@ -244,7 +244,7 @@ mod test {
             .query_async(conn.unnamespaced_borrow_mut())
             .await
             .unwrap();
-        assert!(ttl > 0 && ttl <= 30, "TTL should be set to ~30s, got {ttl}");
+        assert!(ttl > 0 && ttl <= 60, "TTL should be set to ~60s, got {ttl}");
     }
 
     // -----------------------------------------------------------------------
