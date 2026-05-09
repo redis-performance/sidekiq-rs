@@ -1,9 +1,9 @@
 use bb8::{CustomizeConnection, ManageConnection, Pool};
+use redis::aio::MultiplexedConnection as Connection;
 use redis::AsyncCommands;
 pub use redis::RedisError;
 use redis::ToRedisArgs;
 pub use redis::Value as RedisValue;
-use redis::{aio::MultiplexedConnection as Connection, ErrorKind};
 use redis::{Client, IntoConnectionInfo};
 use std::future::Future;
 use std::ops::DerefMut;
@@ -57,8 +57,13 @@ impl ManageConnection for RedisConnectionManager {
     type Error = RedisError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        // Disable response timeout because this connection is used for blocking
+        // commands like BRPOP which can legitimately block for seconds.
+        let config = redis::AsyncConnectionConfig::new().set_response_timeout(None);
         Ok(RedisConnection::new(
-            self.client.get_multiplexed_async_connection().await?,
+            self.client
+                .get_multiplexed_async_connection_with_config(&config)
+                .await?,
         ))
     }
 
@@ -68,7 +73,10 @@ impl ManageConnection for RedisConnectionManager {
             .await?;
         match pong.as_str() {
             "PONG" => Ok(()),
-            _ => Err((ErrorKind::ResponseError, "ping request").into()),
+            _ => Err(redis::RedisError::from((
+                redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+                "ping request",
+            ))),
         }
     }
 
@@ -200,7 +208,10 @@ impl RedisConnection {
             .await
     }
 
-    pub async fn zrangebyscore_limit<L: ToRedisArgs + Send + Sync, U: ToRedisArgs + Sync + Send>(
+    pub async fn zrangebyscore_limit<
+        L: redis::ToSingleRedisArg + Send + Sync,
+        U: redis::ToSingleRedisArg + Sync + Send,
+    >(
         &mut self,
         key: String,
         lower: L,
@@ -213,7 +224,10 @@ impl RedisConnection {
             .await
     }
 
-    pub async fn zadd<V: ToRedisArgs + Send + Sync, S: ToRedisArgs + Send + Sync>(
+    pub async fn zadd<
+        V: redis::ToSingleRedisArg + Send + Sync,
+        S: redis::ToSingleRedisArg + Send + Sync,
+    >(
         &mut self,
         key: String,
         value: V,
