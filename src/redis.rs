@@ -57,8 +57,13 @@ impl ManageConnection for RedisConnectionManager {
     type Error = RedisError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        // Disable response timeout because this connection is used for blocking
+        // commands like BRPOP which can legitimately block for seconds.
+        let config = redis::AsyncConnectionConfig::new().set_response_timeout(None);
         Ok(RedisConnection::new(
-            self.client.get_multiplexed_async_connection().await?,
+            self.client
+                .get_multiplexed_async_connection_with_config(&config)
+                .await?,
         ))
     }
 
