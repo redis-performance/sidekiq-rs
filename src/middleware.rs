@@ -169,31 +169,54 @@ impl ServerMiddleware for RetryMiddleware {
         let err = {
             match chain.next(job, worker, redis.clone()).await {
                 Ok(()) => return Ok(()),
-                Err(err) => format!("{err:?}"),
+                Err(err) => err,
             }
         };
 
         let mut job = job.clone();
 
         // Update error fields on the job.
-        job.error_message = Some(err);
+        job.error_message = Some(format!("{err:?}"));
+        job.error_class = Some(match &err {
+            crate::Error::Message(_) => "RuntimeError".to_string(),
+            crate::Error::Json(_) => "JSON::ParserError".to_string(),
+            crate::Error::Redis(_) | crate::Error::BB8(_) => "Redis::BaseError".to_string(),
+            _ => "StandardError".to_string(),
+        });
         if job.retry_count.is_some() {
-            job.retried_at = Some(chrono::Utc::now().timestamp() as f64);
+            job.retried_at = Some(chrono::Utc::now().timestamp_millis() as f64);
         } else {
-            job.failed_at = Some(chrono::Utc::now().timestamp() as f64);
+            job.failed_at = Some(chrono::Utc::now().timestamp_millis() as f64);
         }
-        let retry_count = job.retry_count.unwrap_or(0) + 1;
+        // Match Ruby Sidekiq: retry_count starts at 0 on first failure.
+        let retry_count = if job.retry_count.is_some() {
+            job.retry_count.unwrap_or(0) + 1
+        } else {
+            0
+        };
         job.retry_count = Some(retry_count);
 
         // Attempt the retry.
-        if retry_count > max_retries || job.retry == RetryOpts::Never {
+        if retry_count >= max_retries || job.retry == RetryOpts::Never {
             error!({
-                "status" = "fail",
+                "status" = "dead",
                 "class" = &job.class,
                 "jid" = &job.jid,
                 "queue" = &job.queue,
                 "err" = &job.error_message
-            }, "Max retries exceeded, will not reschedule job");
+            }, "Max retries exceeded, moving job to dead set");
+
+            // Add to the dead set so the job is visible in Sidekiq web UI.
+            // Score is float seconds (matching Ruby's Time.now.to_f).
+            let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+            if let Err(err) = redis
+                .get()
+                .await?
+                .zadd("dead".to_string(), serde_json::to_string(&job)?, now)
+                .await
+            {
+                error!("Failed to add job to dead set: {:?}", err);
+            }
         } else {
             error!({
                 "status" = "fail",

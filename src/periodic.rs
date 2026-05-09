@@ -193,7 +193,7 @@ impl PeriodicJob {
             queue: self.queue.clone().unwrap_or_else(|| "default".to_string()),
             class: self.class.clone(),
             jid: new_jid(),
-            created_at: chrono::Utc::now().timestamp() as f64,
+            created_at: chrono::Utc::now().timestamp_millis() as f64,
             enqueued_at: None,
             retry: self.retry.clone().unwrap_or(RetryOpts::Never),
             args,
