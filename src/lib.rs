@@ -123,7 +123,7 @@ impl EnqueueOpts {
             queue: self.queue.clone(),
             class,
             jid: new_jid(),
-            created_at: chrono::Utc::now().timestamp() as f64,
+            created_at: chrono::Utc::now().timestamp_millis() as f64,
             enqueued_at: None,
             retry: self.retry.clone(),
             args,
@@ -584,7 +584,7 @@ impl UnitOfWork {
 
     pub(crate) async fn enqueue_direct(&self, redis: &mut RedisConnection) -> Result<()> {
         let mut job = self.job.clone();
-        job.enqueued_at = Some(chrono::Utc::now().timestamp() as f64);
+        job.enqueued_at = Some(chrono::Utc::now().timestamp_millis() as f64);
 
         if let Some(ref duration) = job.unique_for {
             // Check to see if this is unique for the given duration.
@@ -633,8 +633,7 @@ impl UnitOfWork {
     }
 
     fn retry_job_at(count: usize) -> chrono::DateTime<chrono::Utc> {
-        let seconds_to_delay =
-            count.pow(4) + 15 + (rand::rng().random_range(0..30) * (count + 1));
+        let seconds_to_delay = count.pow(4) + 15 + rand::rng().random_range(0..(10 * (count + 1)));
 
         chrono::Utc::now() + chrono::Duration::seconds(seconds_to_delay as i64)
     }

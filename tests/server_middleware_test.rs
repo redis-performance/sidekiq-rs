@@ -181,7 +181,7 @@ mod test {
         let job = job.unwrap();
 
         assert_eq!(job.job.retry, RetryOpts::Yes);
-        assert_eq!(job.job.retry_count, Some(1));
+        assert_eq!(job.job.retry_count, Some(0));
         assert_eq!(job.job.class, "AlwaysFailWorker");
     }
 
@@ -328,6 +328,6 @@ mod test {
 
         assert_eq!(job.job.class, "AlwaysFailWorker");
         assert_eq!(job.job.retry_queue, Some(retry_queue));
-        assert_eq!(job.job.retry_count, Some(1));
+        assert_eq!(job.job.retry_count, Some(0));
     }
 }

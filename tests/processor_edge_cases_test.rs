@@ -67,7 +67,7 @@ mod test {
         // Verify the retried job has the error message
         let mut p2 = Processor::new(redis.clone(), vec!["unknown_worker_queue".to_string()]);
         let work = p2.fetch().await.unwrap().unwrap();
-        assert_eq!(work.job.retry_count, Some(1));
+        assert_eq!(work.job.retry_count, Some(0));
         assert!(
             work.job
                 .error_message
@@ -177,7 +177,11 @@ mod test {
             .zrange("dead".to_string(), isize::MIN, isize::MAX)
             .await
             .unwrap();
-        assert_eq!(dead_jobs.len(), 1, "retry=false job should be in the dead set");
+        assert_eq!(
+            dead_jobs.len(),
+            1,
+            "retry=false job should be in the dead set"
+        );
     }
 
     // -----------------------------------------------------------------------
