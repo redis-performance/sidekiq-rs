@@ -51,8 +51,8 @@ Always run tests before declaring a task complete.
 
 1. Create a branch: `git checkout -b <type>/<description>`.
 2. Commit with a clear message focused on *why*, not *what*.
-3. Open a pull request against `main`.
-4. Do **not** push directly to `main`.
+3. Open a pull request against `master`.
+4. Do **not** push directly to `master`.
 
 ## What to avoid
 
