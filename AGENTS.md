@@ -4,16 +4,20 @@ Instructions for AI coding agents (Claude Code, Copilot, Cursor, etc.) working i
 
 ## Project overview
 
-<!-- TODO: one paragraph describing what this repo does -->
+`sidekiq-rs` (published as `rusty-sidekiq`) is a Rust reimplementation of the Sidekiq background-job framework, fully compatible with `sidekiq.rb` for both enqueuing and processing jobs. It is built on Tokio for async execution and uses `bb8` for Redis connection pooling. Workers are defined by implementing the `Worker<Args>` trait where `Args` is a strongly-typed, `serde`-deserializable struct. The library also supports server middleware, periodic (cron) jobs, unique-job deduplication, Redis namespacing, and configurable worker concurrency.
 
 ## Local setup
 
-<!-- TODO: mirror the setup steps from CONTRIBUTING.md -->
+```bash
+git clone git@github.com:redis-performance/sidekiq-rs.git
+cd sidekiq-rs
+cargo build
+```
+
+The integration tests require a Redis server listening on `redis://127.0.0.1/` (default port 6379). Start one before running tests:
 
 ```bash
-# Example
-git clone git@github.com:redis-performance/<repo>.git
-cd <repo>
+redis-server &
 ```
 
 ## Branch naming
@@ -29,11 +33,16 @@ Same as human contributors: `<type>/<short-description>` (e.g. `fix/off-by-one-i
 
 ## Running tests
 
-<!-- TODO: exact command to run tests -->
+Run the full test suite:
 
 ```bash
-# Example
-make test
+cargo test --verbose
+```
+
+Run Clippy before declaring a task complete:
+
+```bash
+cargo clippy -- -D warnings
 ```
 
 Always run tests before declaring a task complete.
@@ -51,3 +60,5 @@ Always run tests before declaring a task complete.
 - Do not remove error handling or tests.
 - Do not commit secrets, credentials, or large binary files.
 - Do not amend published commits.
+- Do not add new crate dependencies to `Cargo.toml` without explicit maintainer approval.
+- Do not change the public API surface (trait signatures, public structs, method names) without an accompanying discussion in the PR.
