@@ -5,20 +5,23 @@ We treat this repo as "Open Source" within Redis: anyone who clears the bar belo
 ## Local setup
 
 ```bash
-git clone git@github.com:redis-performance/vector-db-benchmark.git
-cd vector-db-benchmark
-
-# Install Poetry (if not already installed)
-pip install poetry
-
-# Install all dependencies
+git clone https://github.com/redis-performance/topdown-profiler.git
+cd topdown-profiler
 poetry install
-
-# Activate the virtual environment
-poetry shell
 ```
 
-Python 3.9–3.13 are supported. Poetry manages the virtualenv automatically; no manual venv creation is needed.
+Python 3.10 or newer is required. [Poetry](https://python-poetry.org/docs/#installation) manages the virtual environment and dependencies — install it first if you don't have it:
+
+```bash
+pipx install poetry   # recommended
+# or: curl -sSL https://install.python-poetry.org | python3 -
+```
+
+To add the optional PostgreSQL backend:
+
+```bash
+poetry install -E postgresql
+```
 
 ## Branch naming
 
@@ -35,13 +38,12 @@ Example: `feat/add-pipeline-mode`
 - Keep changes focused; one logical change per PR.
 - Follow the conventions already present in the codebase (formatting, naming, error handling).
 - No dead code, no commented-out blocks.
-- Code is formatted with [Black](https://black.readthedocs.io/) and imports are sorted with [isort](https://pycqa.github.io/isort/). Run `pre-commit install` after cloning so these run automatically on every commit.
 
 ## Submitting changes
 
-1. Fork or create a branch from `update.redisearch` (the default branch).
+1. Fork or create a branch from `main`.
 2. Make your changes with clear, atomic commits.
-3. Open a pull request against `update.redisearch` with a descriptive title and summary.
+3. Open a pull request against `main` with a descriptive title and summary.
 4. Address review comments promptly; force-push to the same branch to update.
 
 ## Testing
@@ -50,28 +52,21 @@ Example: `feat/add-pipeline-mode`
 - Existing tests must pass: run the test suite locally before opening a PR.
 - Coverage should not decrease.
 
-Run the test suite (requires a local Redis instance on port 6379):
+Run the full test suite:
 
 ```bash
-# Start Redis
-docker run -d --name redis-test -p 6379:6379 redis:8.2-bookworm
-
-# Run the benchmark against the synthetic random-100 dataset as a smoke test
-poetry run python run.py --host localhost --engines redis-default-simple --datasets random-100 --queries 10
-
-# Verify results were written
-ls results/
-
-# Tear down
-docker stop redis-test && docker rm redis-test
-rm -rf results/ datasets/random-100/
+make test
+# equivalent: poetry run pytest tests/ -v
 ```
 
-For engine-level unit tests:
+Run linting:
 
 ```bash
-poetry run pytest tests/
+make lint
+# equivalent: poetry run ruff check topdown/ tests/
 ```
+
+CI runs the test matrix across Python 3.10, 3.11, 3.12, and 3.13. Both `test` and `lint` jobs must be green before a PR can merge.
 
 ## Review process
 
