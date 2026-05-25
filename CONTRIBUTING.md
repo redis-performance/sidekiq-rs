@@ -5,22 +5,15 @@ We treat this repo as "Open Source" within Redis: anyone who clears the bar belo
 ## Local setup
 
 ```bash
-git clone https://github.com/redis-performance/topdown-profiler.git
-cd topdown-profiler
-poetry install
+git clone git@github.com:redis-performance/sidekiq-rs.git
+cd sidekiq-rs
+cargo build
 ```
 
-Python 3.10 or newer is required. [Poetry](https://python-poetry.org/docs/#installation) manages the virtual environment and dependencies — install it first if you don't have it:
+The tests require a running Redis instance on `redis://127.0.0.1/` (default port 6379). Start one locally before running the suite:
 
 ```bash
-pipx install poetry   # recommended
-# or: curl -sSL https://install.python-poetry.org | python3 -
-```
-
-To add the optional PostgreSQL backend:
-
-```bash
-poetry install -E postgresql
+redis-server &
 ```
 
 ## Branch naming
@@ -52,21 +45,17 @@ Example: `feat/add-pipeline-mode`
 - Existing tests must pass: run the test suite locally before opening a PR.
 - Coverage should not decrease.
 
-Run the full test suite:
+Run the full test suite with:
 
 ```bash
-make test
-# equivalent: poetry run pytest tests/ -v
+cargo test --verbose
 ```
 
-Run linting:
+Run Clippy to catch common mistakes and style issues:
 
 ```bash
-make lint
-# equivalent: poetry run ruff check topdown/ tests/
+cargo clippy -- -D warnings
 ```
-
-CI runs the test matrix across Python 3.10, 3.11, 3.12, and 3.13. Both `test` and `lint` jobs must be green before a PR can merge.
 
 ## Review process
 
