@@ -34,9 +34,9 @@ Example: `feat/add-pipeline-mode`
 
 ## Submitting changes
 
-1. Fork or create a branch from `main`.
+1. Fork or create a branch from `master`.
 2. Make your changes with clear, atomic commits.
-3. Open a pull request against `main` with a descriptive title and summary.
+3. Open a pull request against `master` with a descriptive title and summary.
 4. Address review comments promptly; force-push to the same branch to update.
 
 ## Testing
