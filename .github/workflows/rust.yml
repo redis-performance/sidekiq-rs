@@ -5,25 +5,32 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
-
 jobs:
   build:
-
     runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:6
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
 
     steps:
     - uses: actions/checkout@v6
-    - name: Start Redis
-      uses: supercharge/redis-github-action@1.4.0
-      with:
-        redis-version: 6
     - name: Build
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
     - name: Clippy
       run: cargo clippy -- -D warnings
+
