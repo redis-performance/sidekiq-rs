@@ -16,7 +16,7 @@ jobs:
 
     services:
       redis:
-        image: redis:6
+        image: redis:8.6
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 10s
@@ -33,4 +33,3 @@ jobs:
       run: cargo test --verbose
     - name: Clippy
       run: cargo clippy -- -D warnings
-
