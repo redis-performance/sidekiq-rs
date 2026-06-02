@@ -64,7 +64,7 @@ pub struct StatsPublisher {
     concurrency: usize,
 }
 
-fn generate_identity(hostname: &String) -> String {
+pub(crate) fn generate_identity(hostname: &str) -> String {
     let pid = std::process::id();
     let mut bytes = [0u8; 12];
     rand::rng().fill_bytes(&mut bytes);
@@ -82,6 +82,21 @@ impl StatsPublisher {
         concurrency: usize,
     ) -> Self {
         let identity = generate_identity(&hostname);
+        Self::new_with_identity(hostname, identity, queues, busy_jobs, concurrency)
+    }
+
+    /// Variant that lets the caller provide a pre-computed identity, so that
+    /// the Processor and the heartbeat publisher share the same `<identity>`
+    /// (and the `<identity>:work` HSETs from track-stats line up with the
+    /// `processes` set membership / heartbeat hash on the same key).
+    #[must_use]
+    pub fn new_with_identity(
+        hostname: String,
+        identity: String,
+        queues: Vec<String>,
+        busy_jobs: Counter,
+        concurrency: usize,
+    ) -> Self {
         let started_at = chrono::Utc::now();
 
         Self {
@@ -135,19 +150,21 @@ impl StatsPublisher {
         Ok(())
     }
 
-    /// Remove this process from the `processes` set and delete the heartbeat hash.
-    ///
-    /// Mirrors Ruby Sidekiq's `Launcher#clear_heartbeat`, which pipelines:
+    /// Remove this process from the `processes` set and delete the heartbeat
+    /// hash plus the per-process work hash. Mirrors Ruby Sidekiq's
+    /// `Launcher#clear_heartbeat`, which pipelines:
     ///   `SREM processes [identity]`
     ///   `UNLINK identity:work`
     ///
-    /// rusty-sidekiq does not maintain a per-process `:work` hash, so only the
-    /// set membership and the heartbeat hash itself are cleaned up here.
+    /// The `identity:work` hash is only populated when `ProcessorConfig`'s
+    /// `track_stats` flag is on; unlinking it unconditionally is harmless when
+    /// it doesn't exist.
     pub async fn deregister(&self, redis: RedisPool) -> Result<(), Box<dyn std::error::Error>> {
         let mut conn = redis.get().await?;
         conn.srem("processes".to_string(), self.identity.clone())
             .await?;
         conn.unlink(self.identity.clone()).await?;
+        conn.unlink(format!("{}:work", self.identity)).await?;
         Ok(())
     }
 
