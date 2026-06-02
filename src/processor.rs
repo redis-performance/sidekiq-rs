@@ -7,6 +7,7 @@ use rand::RngCore;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use tokio::select;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
@@ -77,6 +78,14 @@ pub struct ProcessorConfig {
     /// behavior; benchmarks measuring production-faithful job throughput
     /// should turn it on.
     pub track_stats: bool,
+
+    /// Optional sink for per-BRPOP-call latency samples, in microseconds. The
+    /// duration is measured around the `BRPOP queues … timeout` call inside
+    /// `Processor::fetch` and pushed onto this channel only when work was
+    /// returned (empty-queue timeouts are skipped — they'd dwarf the actual
+    /// command-side latency and tell us nothing about Redis). Drives the
+    /// Phase 3 per-command HDR; set to `None` when the caller doesn't care.
+    pub brpop_latency_tx: Option<mpsc::UnboundedSender<u64>>,
 }
 
 #[derive(Default, Clone)]
@@ -125,6 +134,12 @@ impl ProcessorConfig {
         self.track_stats = track_stats;
         self
     }
+
+    #[must_use]
+    pub fn brpop_latency_tx(mut self, tx: mpsc::UnboundedSender<u64>) -> Self {
+        self.brpop_latency_tx = Some(tx);
+        self
+    }
 }
 
 impl Default for ProcessorConfig {
@@ -134,6 +149,7 @@ impl Default for ProcessorConfig {
             balance_strategy: Default::default(),
             queue_configs: Default::default(),
             track_stats: false,
+            brpop_latency_tx: None,
         }
     }
 }
@@ -183,6 +199,7 @@ impl Processor {
     pub async fn fetch(&mut self) -> Result<Option<UnitOfWork>> {
         self.run_balance_strategy();
 
+        let started = std::time::Instant::now();
         let response: Option<(String, String)> = self
             .redis
             .get()
@@ -191,6 +208,12 @@ impl Processor {
             .await?;
 
         if let Some((queue, job_raw)) = response {
+            // Only record when work came back. Empty-queue timeouts spend ~2 s
+            // in BRPOP waiting and would dominate the histogram without telling
+            // us anything about Redis-side command time.
+            if let Some(tx) = &self.config.brpop_latency_tx {
+                let _ = tx.send(started.elapsed().as_micros().max(1) as u64);
+            }
             let job: Job = serde_json::from_str(&job_raw)?;
             return Ok(Some(UnitOfWork { queue, job }));
         }
