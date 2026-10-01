@@ -887,4 +887,15 @@ mod test {
 
         assert_eq!(cfg.num_workers, 1000);
     }
+
+    #[tokio::test]
+    async fn processor_config_track_stats_default_off() {
+        // Default off so the lib keeps the historical rusty-sidekiq write
+        // profile; opt in to match Ruby Sidekiq's default `track_stats = true`.
+        let cfg = ProcessorConfig::default();
+        assert!(!cfg.track_stats);
+
+        let cfg = cfg.track_stats(true);
+        assert!(cfg.track_stats);
+    }
 }

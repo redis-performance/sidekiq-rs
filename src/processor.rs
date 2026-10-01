@@ -1,11 +1,13 @@
 use super::Result;
 use crate::{
-    periodic::PeriodicJob, Chain, Counter, Job, RedisPool, Scheduled, ServerMiddleware,
-    StatsPublisher, UnitOfWork, Worker, WorkerRef,
+    periodic::PeriodicJob, stats::generate_identity, Chain, Counter, Job, RedisPool, Scheduled,
+    ServerMiddleware, StatsPublisher, UnitOfWork, Worker, WorkerRef,
 };
+use rand::RngCore;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use tokio::select;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
@@ -27,6 +29,14 @@ pub struct Processor {
     busy_jobs: Counter,
     cancellation_token: CancellationToken,
     config: ProcessorConfig,
+    /// Sidekiq process identity (`hostname:pid:nonce`). Shared between the
+    /// heartbeat publisher (`processes` set + `<identity>` hash) and the
+    /// track-stats writes (`<identity>:work` HSET/HDEL) so they line up.
+    identity: Arc<String>,
+    /// Per-worker thread id, set on each clone in `spawn_worker` before the
+    /// worker loop starts. `None` on the original Processor and on the clone
+    /// used for the heartbeat / scheduled / periodic tasks.
+    worker_tid: Option<String>,
 }
 
 #[derive(Clone)]
@@ -58,6 +68,24 @@ pub struct ProcessorConfig {
     /// Queue-specific configurations. The queues specified in this field do not need to match
     /// the list of queues provided to [`Processor::new`].
     pub queue_configs: BTreeMap<String, QueueConfig>,
+
+    /// Mirror Sidekiq's `Sidekiq[:track_stats]` (default `true` upstream).
+    /// When enabled, every processed job emits four extra Redis commands —
+    /// `HSET <identity>:work <tid> <work_json>` on start, then `HDEL` /
+    /// `INCR stat:processed` / `INCR stat:processed:<date>` on completion —
+    /// matching what Ruby Sidekiq writes to feed the Web UI's Processed/Busy
+    /// dashboards. Off by default here to preserve historical rusty-sidekiq
+    /// behavior; benchmarks measuring production-faithful job throughput
+    /// should turn it on.
+    pub track_stats: bool,
+
+    /// Optional sink for per-BRPOP-call latency samples, in microseconds. The
+    /// duration is measured around the `BRPOP queues … timeout` call inside
+    /// `Processor::fetch` and pushed onto this channel only when work was
+    /// returned (empty-queue timeouts are skipped — they'd dwarf the actual
+    /// command-side latency and tell us nothing about Redis). Drives the
+    /// Phase 3 per-command HDR; set to `None` when the caller doesn't care.
+    pub brpop_latency_tx: Option<mpsc::UnboundedSender<u64>>,
 }
 
 #[derive(Default, Clone)]
@@ -100,6 +128,18 @@ impl ProcessorConfig {
         self.queue_configs.insert(queue, config);
         self
     }
+
+    #[must_use]
+    pub fn track_stats(mut self, track_stats: bool) -> Self {
+        self.track_stats = track_stats;
+        self
+    }
+
+    #[must_use]
+    pub fn brpop_latency_tx(mut self, tx: mpsc::UnboundedSender<u64>) -> Self {
+        self.brpop_latency_tx = Some(tx);
+        self
+    }
 }
 
 impl Default for ProcessorConfig {
@@ -108,6 +148,8 @@ impl Default for ProcessorConfig {
             num_workers: num_cpus::get(),
             balance_strategy: Default::default(),
             queue_configs: Default::default(),
+            track_stats: false,
+            brpop_latency_tx: None,
         }
     }
 }
@@ -124,6 +166,11 @@ impl Processor {
     #[must_use]
     pub fn new(redis: RedisPool, queues: Vec<String>) -> Self {
         let busy_jobs = Counter::new(0);
+        let hostname = gethostname::gethostname()
+            .to_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| "UNKNOWN_HOSTNAME".to_string());
+        let identity = Arc::new(generate_identity(&hostname));
 
         Self {
             chain: Chain::new_with_stats(busy_jobs.clone()),
@@ -139,6 +186,8 @@ impl Processor {
             human_readable_queues: queues,
             cancellation_token: CancellationToken::new(),
             config: Default::default(),
+            identity,
+            worker_tid: None,
         }
     }
 
@@ -150,6 +199,7 @@ impl Processor {
     pub async fn fetch(&mut self) -> Result<Option<UnitOfWork>> {
         self.run_balance_strategy();
 
+        let started = std::time::Instant::now();
         let response: Option<(String, String)> = self
             .redis
             .get()
@@ -158,6 +208,12 @@ impl Processor {
             .await?;
 
         if let Some((queue, job_raw)) = response {
+            // Only record when work came back. Empty-queue timeouts spend ~2 s
+            // in BRPOP waiting and would dominate the histogram without telling
+            // us anything about Redis-side command time.
+            if let Some(tx) = &self.config.brpop_latency_tx {
+                let _ = tx.send(started.elapsed().as_micros().max(1) as u64);
+            }
             let job: Job = serde_json::from_str(&job_raw)?;
             return Ok(Some(UnitOfWork { queue, job }));
         }
@@ -213,15 +269,61 @@ impl Processor {
             "jid" = &work.job.jid
         }, "sidekiq");
 
-        let worker = if let Some(worker) = self.workers.get(&work.job.class) {
-            worker.clone()
-        } else {
-            Arc::new(WorkerRef::not_found(work.job.class.clone()))
-        };
+        // Mirror Ruby Sidekiq's per-job `Processor#dispatch` writes (gated by
+        // `Sidekiq[:track_stats]`, default `true` upstream). The work hash is
+        // populated on start and cleaned up on completion; the per-process
+        // `stat:processed[:date]` counters are bumped on success. We follow
+        // Ruby's payload shape so byte counts on the wire match real Sidekiq.
+        if self.config.track_stats {
+            if let Some(tid) = self.worker_tid.clone() {
+                let work_payload =
+                    serde_json::to_string(&serde_json::json!({
+                        "queue": &work.job.queue,
+                        "payload": serde_json::to_string(&work.job)?,
+                        "run_at": chrono::Utc::now().timestamp(),
+                    }))?;
+                let workkey = format!("{}:work", self.identity);
+                let mut conn = self.redis.get().await?;
+                let _: () = conn
+                    .cmd_with_key("HSET", workkey)
+                    .arg(tid)
+                    .arg(work_payload)
+                    .query_async(conn.unnamespaced_borrow_mut())
+                    .await?;
+            }
+        }
 
-        self.chain
-            .call(&work.job, worker, self.redis.clone())
-            .await?;
+        let chain_res = self
+            .chain
+            .call(&work.job, self.workers.get(&work.job.class).cloned().unwrap_or_else(
+                || Arc::new(WorkerRef::not_found(work.job.class.clone())),
+            ), self.redis.clone())
+            .await;
+
+        if self.config.track_stats {
+            if let Some(tid) = self.worker_tid.clone() {
+                let workkey = format!("{}:work", self.identity);
+                let nowdate = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                let mut conn = self.redis.get().await?;
+                let _: () = conn
+                    .cmd_with_key("HDEL", workkey)
+                    .arg(&tid)
+                    .query_async(conn.unnamespaced_borrow_mut())
+                    .await?;
+                if chain_res.is_ok() {
+                    let _: () = conn
+                        .cmd_with_key("INCR", "stat:processed".to_string())
+                        .query_async(conn.unnamespaced_borrow_mut())
+                        .await?;
+                    let _: () = conn
+                        .cmd_with_key("INCR", format!("stat:processed:{nowdate}"))
+                        .query_async(conn.unnamespaced_borrow_mut())
+                        .await?;
+                }
+            }
+        }
+
+        chain_res?;
 
         // TODO: Make this only say "done" when the job is successful.
         // We might need to change the ChainIter to return the final job and
@@ -280,6 +382,19 @@ impl Processor {
                             num: usize,
                             dedicated_queue_name: Option<String>| {
             async move {
+                // Each worker task gets a stable tid for its `<identity>:work`
+                // HSET/HDEL pair. Format mirrors Ruby Sidekiq's
+                // `SecureRandom.hex(4)` (8 hex chars) but is derived from the
+                // worker index + a per-process random suffix so collisions are
+                // statistically impossible across processes on the same host.
+                let mut suffix = [0u8; 2];
+                rand::rng().fill_bytes(&mut suffix);
+                processor.worker_tid = Some(format!(
+                    "tid:{:04x}{}",
+                    (num as u16).wrapping_add(u16::from_be_bytes(suffix)),
+                    hex::encode(suffix)
+                ));
+
                 loop {
                     if let Err(err) = processor.process_one().await {
                         error!("Error leaked out the bottom: {:?}", err);
@@ -329,6 +444,8 @@ impl Processor {
             let queues = self.human_readable_queues.clone();
             let busy_jobs = self.busy_jobs.clone();
             let cancellation_token = self.cancellation_token.clone();
+            let shared_identity = self.identity.clone();
+            let num_workers = self.config.num_workers;
             async move {
                 let hostname = if let Some(host) = gethostname::gethostname().to_str() {
                     host.to_string()
@@ -336,8 +453,13 @@ impl Processor {
                     "UNKNOWN_HOSTNAME".to_string()
                 };
 
-                let stats_publisher =
-                    StatsPublisher::new(hostname, queues, busy_jobs, self.config.num_workers);
+                let stats_publisher = StatsPublisher::new_with_identity(
+                    hostname,
+                    (*shared_identity).clone(),
+                    queues,
+                    busy_jobs,
+                    num_workers,
+                );
 
                 loop {
                     // TODO: Use process count to meet a 5 second avg.
@@ -351,6 +473,17 @@ impl Processor {
                     if let Err(err) = stats_publisher.publish_stats(redis.clone()).await {
                         error!("Error publishing processor stats: {:?}", err);
                     }
+                }
+
+                // On graceful shutdown, remove the process from the `processes` set and
+                // delete the heartbeat hash. This mirrors Ruby Sidekiq's clear_heartbeat():
+                //   pipeline.srem("processes", [identity])
+                //   pipeline.unlink("#{identity}:work")
+                // Without this, stale entries accumulate in the `processes` set until the
+                // heartbeat hash's 60-second TTL expires — but the set membership has no TTL
+                // and never self-cleans.
+                if let Err(err) = stats_publisher.deregister(redis.clone()).await {
+                    error!("Error deregistering processor from Redis on shutdown: {:?}", err);
                 }
 
                 debug!("Broke out of loop web metrics");
